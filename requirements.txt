@@ -32,6 +32,9 @@ httpx==0.28.1
 # Progress bars
 tqdm==4.67.1
 
+# Rate limiting
+slowapi==0.1.9
+
 # Config & env
 pydantic-settings==2.7.0
 python-dotenv==1.0.1

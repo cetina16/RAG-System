@@ -2,68 +2,71 @@
 
 A fully deployable **Retrieval-Augmented Generation (RAG)** system built with FastAPI, LangGraph, FAISS, and Mistral. Designed to ingest messy real-world PDFs, retrieve relevant passages using hybrid search, and generate grounded responses with source citations.
 
+Includes a **built-in web UI** served at `/` — no separate frontend server needed.
+
 ---
 
 ## Aim
 
 Standard LLMs hallucinate when asked about private or domain-specific knowledge. RAG solves this by grounding every response in retrieved documents — the model can only answer from what it actually finds. This system demonstrates a production-grade RAG pipeline with:
 
-- PDF ingestion with text cleaning
-- Hybrid retrieval (semantic + keyword) 
+- PDF ingestion with text cleaning and duplicate detection
+- Hybrid retrieval (semantic + keyword) for higher recall
 - Cross-encoder re-ranking for higher precision
 - A stateful LangGraph pipeline with query rewriting
 - Full observability via structured logging and per-node tracing
-- A clean REST API with streaming support
+- A clean REST API with SSE streaming support
+- A built-in chat UI served directly by FastAPI
+- Rate limiting and duplicate ingest protection
 
 ---
 
 ## Architecture
 
 ```
-                        ┌─────────────────────────────────┐
-                        │           FastAPI Server         │
-                        │                                 │
-                        │  POST /api/v1/ingest            │
-                        │  POST /api/v1/query             │
-                        │  GET  /api/v1/health            │
-                        └────────────┬────────────────────┘
-                                     │
-              ┌──────────────────────┴─────────────────────────┐
-              │                                                 │
-   ┌──────────▼──────────┐                        ┌────────────▼──────────┐
-   │   INGESTION PIPELINE │                        │   QUERY PIPELINE      │
-   │                      │                        │   (LangGraph)         │
-   │  PDF (PyMuPDF)       │                        │                       │
-   │       ↓              │                        │  ┌─────────────────┐  │
-   │  Cleaner (ftfy)      │                        │  │ query_rewriter  │  │
-   │       ↓              │                        │  │ (LLM rewrites   │  │
-   │  Chunker             │                        │  │  query → 3      │  │
-   │  (512 tok, 64 ovlp)  │                        │  │  variants)      │  │
-   │       ↓              │                        │  └────────┬────────┘  │
-   │  Embedder            │                        │           ↓           │
-   │  (BGE-base-en)       │                        │  ┌─────────────────┐  │
-   │       ↓              │                        │  │   retriever     │  │
-   │  FAISS IndexFlatIP   │◄───────────────────────│  │  BM25 + FAISS   │  │
-   │  (persisted to disk) │                        │  │  → RRF merge    │  │
-   └──────────────────────┘                        │  └────────┬────────┘  │
-                                                   │           ↓           │
-                                                   │  ┌─────────────────┐  │
-                                                   │  │   reranker      │  │
-                                                   │  │  cross-encoder  │  │
-                                                   │  │  top-20 → top-5 │  │
-                                                   │  └────────┬────────┘  │
-                                                   │           ↓           │
-                                                   │  ┌─────────────────┐  │
-                                                   │  │   generator     │  │
-                                                   │  │  Mistral LLM    │  │
-                                                   │  │  + citations    │  │
-                                                   │  └─────────────────┘  │
-                                                   └───────────────────────┘
-                                                              │
-                                              ┌───────────────▼──────────────┐
-                                              │      Cache Layer (LRU/TTL)   │
-                                              │  SHA256(query+k) → response  │
-                                              └──────────────────────────────┘
+  Browser
+    │
+    ▼
+┌─────────────────────────────────────────────────────────────┐
+│                      FastAPI Server                          │
+│                                                             │
+│   GET  /                     → Web UI (index.html)          │
+│   GET  /api/v1/health        → index stats + cache info     │
+│   POST /api/v1/ingest        → PDF upload (rate: 10/min)    │
+│   POST /api/v1/query         → RAG query + SSE streaming    │
+│   GET  /api/v1/documents     → list indexed files           │
+│   DELETE /api/v1/index       → reset FAISS index            │
+└────────────┬──────────────────────────┬─────────────────────┘
+             │                          │
+  ┌──────────▼──────────┐   ┌───────────▼───────────────────┐
+  │  INGESTION PIPELINE  │   │   QUERY PIPELINE (LangGraph)  │
+  │                      │   │                               │
+  │  MD5 duplicate check │   │  ┌─────────────────────────┐  │
+  │  PyMuPDF extraction  │   │  │   query_rewriter        │  │
+  │  ftfy text cleaning  │   │  │   LLM → 3 query variants│  │
+  │  512-tok chunking    │   │  └────────────┬────────────┘  │
+  │  BGE-base embeddings │   │               ↓               │
+  │  FAISS IndexFlatIP   │◄──│  ┌─────────────────────────┐  │
+  │  (disk persisted)    │   │  │   retriever_node        │  │
+  └──────────────────────┘   │  │   BM25 + FAISS + RRF    │  │
+                             │  │   top-20 docs           │  │
+                             │  └────────────┬────────────┘  │
+                             │               ↓               │
+                             │  ┌─────────────────────────┐  │
+                             │  │   reranker_node         │  │
+                             │  │   cross-encoder → top-5 │  │
+                             │  └────────────┬────────────┘  │
+                             │               ↓               │
+                             │  ┌─────────────────────────┐  │
+                             │  │   generator_node        │  │
+                             │  │   Mistral LLM + cites   │  │
+                             │  └─────────────────────────┘  │
+                             └───────────────────────────────┘
+                                            │
+                            ┌───────────────▼──────────────┐
+                            │   TTLCache (SHA256 key)       │
+                            │   cache hit → skip pipeline  │
+                            └──────────────────────────────┘
 ```
 
 ### LangGraph Pipeline Flow
@@ -93,11 +96,28 @@ END
 
 ---
 
+## Web UI
+
+A chat interface is served at `http://localhost:8000` — no React, no separate build step, no extra server. It is a single static HTML file served by FastAPI.
+
+**Features:**
+- Drag-and-drop PDF upload with progress bar
+- Duplicate file detection (re-uploading the same PDF shows an error)
+- Live index stats (document count, cache size)
+- List of all ingested files in the sidebar
+- Chat interface with streaming token output
+- Citations displayed under each response (source file, page, rerank score)
+- Per-node latency trace shown in non-streaming mode
+- One-click index reset with confirmation dialog
+
+---
+
 ## Tech Stack
 
 | Layer | Technology | Why |
 |---|---|---|
-| API framework | FastAPI | Async, auto-docs (Swagger), SSE streaming |
+| API framework | FastAPI | Async, auto-docs (Swagger), SSE streaming, static file serving |
+| Frontend | Vanilla HTML/CSS/JS | Zero build step, served directly by FastAPI, no framework overhead |
 | Pipeline orchestration | LangGraph | Stateful graph with conditional edges, easy to extend |
 | Document processing | PyMuPDF (`fitz`) | Best-in-class messy PDF extraction |
 | Text cleaning | ftfy | Fixes Unicode mojibake, encoding errors |
@@ -107,9 +127,10 @@ END
 | Keyword search | BM25 (`rank_bm25`) | Captures exact matches that semantic search misses |
 | Fusion | Reciprocal Rank Fusion (RRF) | Parameter-free, robust merging of ranked lists |
 | Re-ranking | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Precise (query, passage) scoring after first-stage retrieval |
-| LLM | Mistral (API) / Stub | Swappable via env var |
+| LLM | Mistral (API) / Stub | Swappable via env var, works without API key |
 | Logging | structlog | Structured JSON logs, per-request traces |
 | Caching | cachetools `TTLCache` | In-memory LRU + TTL, no Redis dependency |
+| Rate limiting | slowapi | Per-IP rate limiting on ingest endpoint |
 | Containerisation | Docker + docker-compose | Single-command deployment |
 
 ---
@@ -119,11 +140,14 @@ END
 ```
 RAG-System/
 ├── app/
-│   ├── main.py                        # FastAPI app + lifespan (model warm-up)
+│   ├── main.py                        # FastAPI app + lifespan + static file serving
+│   ├── static/
+│   │   └── index.html                 # Full web UI (chat + upload + index management)
 │   ├── api/routes/
 │   │   ├── health.py                  # GET  /api/v1/health
-│   │   ├── ingest.py                  # POST /api/v1/ingest
-│   │   └── query.py                   # POST /api/v1/query (+ SSE streaming)
+│   │   ├── ingest.py                  # POST /api/v1/ingest (rate limited, dedup)
+│   │   ├── query.py                   # POST /api/v1/query (+ SSE streaming)
+│   │   └── documents.py               # GET  /api/v1/documents, DELETE /api/v1/index
 │   ├── core/
 │   │   ├── config.py                  # Pydantic settings from .env
 │   │   └── logging.py                 # structlog configuration
@@ -177,22 +201,25 @@ RAG-System/
 ## Design Trade-offs
 
 ### FAISS vs. managed vector DB (Pinecone, Qdrant)
-**Chose FAISS** for zero infrastructure overhead — no Docker service, no API key, runs fully local. Trade-off: no built-in filtering, no distributed scale, and the BM25 index must be rebuilt in memory (not persistent). For production at scale, migrating to Qdrant (self-hosted) or Pinecone adds ~50 lines of code.
+**Chose FAISS** for zero infrastructure overhead — no Docker service, no API key, runs fully local. Trade-off: no built-in metadata filtering, no distributed scale, and the BM25 index must be rebuilt in memory (not persistent). For production at scale, migrating to Qdrant adds ~50 lines of code.
 
 ### Hybrid retrieval (BM25 + FAISS) vs. semantic-only
-**Chose hybrid** because pure semantic search misses exact keyword matches (e.g. acronyms, version numbers, names). BM25 captures these; FAISS captures conceptual similarity. RRF fusion is parameter-free and consistently outperforms either alone.
+**Chose hybrid** because pure semantic search misses exact keyword matches (e.g. acronyms, version numbers, proper names). BM25 captures these; FAISS captures conceptual similarity. RRF fusion is parameter-free and consistently outperforms either alone.
 
 ### Two-stage retrieval (retrieve 20 → rerank to 5) vs. retrieve 5 directly
-**Chose two-stage** because embedding models optimise for recall, not precision. Retrieving a larger candidate set (20) then re-ranking with an expensive cross-encoder gives much higher precision than retrieving 5 directly. The cross-encoder is ~10× slower per pair but only runs on 20 candidates.
+**Chose two-stage** because embedding models optimise for recall, not precision. Retrieving a larger candidate set (20) then re-ranking with a cross-encoder gives much higher precision. The cross-encoder is slower per pair but only runs on 20 candidates, not the whole index.
 
 ### LangGraph vs. plain function chain
-**Chose LangGraph** because it provides: a typed state object, conditional edges (e.g. skip reranker if no docs), per-node observability, and a clear extension point for future agentic loops (e.g. iterative retrieval, tool use).
+**Chose LangGraph** because it provides: a typed state object, conditional edges (e.g. skip reranker if no docs found), per-node observability via span tracing, and a clear extension point for agentic loops (iterative retrieval, tool use).
+
+### Vanilla frontend vs. React/Next.js
+**Chose a single HTML file** served by FastAPI. Zero build pipeline, zero npm, no separate dev server. Works out of the box and stays in the same Docker image. Easy to replace with React later if needed.
 
 ### In-memory cache vs. Redis
-**Chose `cachetools.TTLCache`** to eliminate the Redis dependency for prototyping. Cache is lost on restart. Swapping to Redis requires ~20 lines of change in `app/cache/query_cache.py`.
+**Chose `cachetools.TTLCache`** to eliminate the Redis dependency. Cache is lost on restart. Swapping to Redis requires ~20 lines of change in `app/cache/query_cache.py`.
 
 ### Stub LLM vs. requiring a real API key
-**Chose a stub** so the full pipeline works and is testable without a Mistral account. The `get_llm_client()` factory auto-switches to the real API when `MISTRAL_API_KEY` is set.
+**Chose a stub** so the full pipeline runs and is testable without a Mistral account. The `get_llm_client()` factory auto-switches to the real API when `MISTRAL_API_KEY` is set in `.env`.
 
 ---
 
@@ -220,8 +247,10 @@ cp .env.example .env
 
 # 4. Start the server
 uvicorn app.main:app --reload
-# → http://localhost:8000
-# → http://localhost:8000/docs  (Swagger UI)
+
+# Open in browser:
+# http://localhost:8000        → Web UI
+# http://localhost:8000/docs  → Swagger API docs
 ```
 
 ### Docker
@@ -234,7 +263,15 @@ docker-compose up --build
 
 ---
 
-## API Usage
+## API Reference
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/v1/health` | Server status, index doc count, cache stats |
+| `POST` | `/api/v1/ingest` | Upload a PDF (multipart/form-data), rate: 10/min |
+| `POST` | `/api/v1/query` | Ask a question, optional SSE streaming |
+| `GET` | `/api/v1/documents` | List all files in the FAISS index |
+| `DELETE` | `/api/v1/index` | Wipe the FAISS index and reset all state |
 
 ### Health check
 ```bash
@@ -255,9 +292,11 @@ curl -X POST http://localhost:8000/api/v1/ingest \
   "pages_extracted": 5,
   "chunks_created": 15,
   "total_index_size": 15,
-  "duration_ms": 462.3
+  "duration_ms": 462.3,
+  "duplicate": false
 }
 ```
+Uploading the same file twice returns `409 Conflict`.
 
 ### Query
 ```bash
@@ -269,7 +308,7 @@ curl -X POST http://localhost:8000/api/v1/query \
 {
   "query": "How do I access the system via SSH?",
   "rewritten_query": "methods to connect to the system using SSH keys",
-  "response": "To access the system via SSH:\n1. Run `ssh username@login.ai.lrz.de` [Doc 1]\n2. For passwordless login, set up an SSH key with `ssh-copy-id` [Doc 3]",
+  "response": "To access via SSH: run `ssh username@login.ai.lrz.de` [Doc 1]. For passwordless login use ssh-copy-id [Doc 3].",
   "citations": [
     {
       "doc_index": 1,
@@ -305,6 +344,27 @@ data: {"type": "token", "content": "To "}
 data: {"type": "token", "content": "submit "}
 ...
 data: [DONE]
+```
+
+### List indexed documents
+```bash
+curl http://localhost:8000/api/v1/documents
+```
+```json
+{
+  "files": [
+    {"filename": "LRZ Intro.pdf", "chunks": 15, "pages": [0, 1, 2, 3, 4]}
+  ],
+  "total_chunks": 15
+}
+```
+
+### Reset the index
+```bash
+curl -X DELETE http://localhost:8000/api/v1/index
+```
+```json
+{"message": "Index reset successfully."}
 ```
 
 ### Bulk ingest via CLI
@@ -378,7 +438,16 @@ MISTRAL_MODEL=mistral-large-latest
 ```bash
 ollama pull mixtral
 ```
-Then update `app/llm/mistral_client.py` to point `MISTRAL_API_BASE` at `http://localhost:11434/v1` (Ollama's OpenAI-compatible endpoint).
+Then set in `.env`:
+```
+MISTRAL_API_BASE=http://localhost:11434/v1
+MISTRAL_API_KEY=ollama
+MISTRAL_MODEL=mixtral
+```
 
 **Option 3 — Groq (fast, free tier)**
-Set `MISTRAL_API_BASE=https://api.groq.com/openai/v1` and use a Groq API key.
+```
+MISTRAL_API_BASE=https://api.groq.com/openai/v1
+MISTRAL_API_KEY=your_groq_key
+MISTRAL_MODEL=mixtral-8x7b-32768
+```

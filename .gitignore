@@ -1,0 +1,12 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+data/faiss_index/
+data/pdfs/
+*.egg-info/
+dist/
+.pytest_cache/
+.mypy_cache/
+.DS_Store

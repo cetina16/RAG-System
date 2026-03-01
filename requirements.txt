@@ -1,0 +1,42 @@
+# Web framework
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+python-multipart==0.0.12
+
+# LangChain ecosystem
+langchain==0.3.13
+langchain-community==0.3.13
+langchain-huggingface==0.1.2
+langgraph==0.2.60
+
+# Embeddings & vector store
+sentence-transformers==3.3.1
+faiss-cpu==1.9.0.post1
+
+# Hybrid search
+rank-bm25==0.2.2
+
+# PDF processing
+pymupdf==1.25.1
+ftfy==6.3.1
+
+# Structured logging
+structlog==24.4.0
+
+# Caching
+cachetools==5.5.0
+
+# HTTP client
+httpx==0.28.1
+
+# Progress bars
+tqdm==4.67.1
+
+# Config & env
+pydantic-settings==2.7.0
+python-dotenv==1.0.1
+
+# Testing
+pytest==8.3.4
+pytest-asyncio==0.25.2
+httpx==0.28.1

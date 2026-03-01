@@ -100,6 +100,8 @@ END
 
 A chat interface is served at `http://localhost:8000` — no React, no separate build step, no extra server. It is a single static HTML file served by FastAPI.
 
+![RAG System UI](docs/Screenshot%202026-03-01%20at%2012.34.42.png)
+
 **Features:**
 - Drag-and-drop PDF upload with progress bar
 - Duplicate file detection (re-uploading the same PDF shows an error)
